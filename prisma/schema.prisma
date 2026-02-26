@@ -127,8 +127,8 @@ model OrderItemTopping {
   id                   Int     @id @default(autoincrement())
   orderItemId          Int
   toppingId            Int
-
   toppingName          String  @db.VarChar(100)
+  productImage    String? @db.VarChar(255) 
   toppingBasePesewas   Int
   priceAppliedPesewas  Int
 

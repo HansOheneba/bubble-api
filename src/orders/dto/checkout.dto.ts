@@ -1,12 +1,11 @@
 import {
   IsString,
+  IsInt,
   IsOptional,
   IsArray,
   ValidateNested,
-  IsInt,
   Min,
   ArrayMinSize,
-  IsNotEmpty,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -42,25 +41,23 @@ export class OrderItemDto {
 
   @IsString()
   @IsOptional()
-  note?: string;
+  note?: string; // ← per-item note, already saved by service
 }
 
 export class CheckoutDto {
   @IsString()
-  @IsNotEmpty()
   phone: string;
 
   @IsString()
-  @IsNotEmpty()
   locationText: string;
 
   @IsString()
   @IsOptional()
-  notes?: string;
+  notes?: string; // ← order-level note
 
   @IsArray()
-  @ValidateNested({ each: true })
   @ArrayMinSize(1)
+  @ValidateNested({ each: true })
   @Type(() => OrderItemDto)
   items: OrderItemDto[];
 }
