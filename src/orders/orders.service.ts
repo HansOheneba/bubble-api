@@ -42,7 +42,6 @@ export class OrdersService {
       let variantLabel: string | null = null;
 
       if (item.variantId) {
-        // shawarma — price comes from the variant
         const variant = variantMap.get(item.variantId);
         if (!variant || variant.productId !== product.id) {
           throw new BadRequestException(
@@ -52,7 +51,6 @@ export class OrdersService {
         unitPesewas = variant.priceInPesewas;
         variantLabel = variant.label;
       } else {
-        // drink or single-price item — price comes from the product
         if (product.priceInPesewas === null) {
           throw new BadRequestException(
             `${product.name} requires a variant selection`,
@@ -103,54 +101,63 @@ export class OrdersService {
       };
     });
 
-    const order = await this.prisma.$transaction(async (tx) => {
-      const created = await tx.order.create({
-        data: {
-          phone: dto.phone,
-          locationText: dto.locationText,
-          notes: dto.notes ?? null,
-          totalPesewas: orderTotalPesewas,
-          status: 'pending',
-          paymentStatus: 'unpaid',
-        },
-      });
-
-      for (const item of preparedItems) {
-        const orderItem = await tx.orderItem.create({
+    const order = await this.prisma.$transaction(
+      async (tx) => {
+        const created = await tx.order.create({
           data: {
-            orderId: created.id,
-            productId: item.productId,
-            variantId: item.variantId,
-            productName: item.productName,
-            variantLabel: item.variantLabel,
-            unitPesewas: item.unitPesewas,
-            quantity: item.quantity,
-            sugarLevel: item.sugarLevel,
-            spiceLevel: item.spiceLevel,
-            note: item.note,
+            phone: dto.phone,
+            locationText: dto.locationText,
+            notes: dto.notes ?? null,
+            totalPesewas: orderTotalPesewas,
+            status: 'pending',
+            paymentStatus: 'unpaid',
           },
         });
 
-        for (const t of item.toppings) {
-          await tx.orderItemTopping.create({
-            data: {
-              orderItemId: orderItem.id,
-              toppingId: t.toppingId,
-              toppingName: t.toppingName,
-              toppingBasePesewas: t.toppingBasePesewas,
-              priceAppliedPesewas: t.priceAppliedPesewas,
-            },
-          });
-        }
-      }
+        // Create all order items in parallel instead of sequentially
+        const orderItems = await Promise.all(
+          preparedItems.map((item) =>
+            tx.orderItem.create({
+              data: {
+                orderId: created.id,
+                productId: item.productId,
+                variantId: item.variantId,
+                productName: item.productName,
+                variantLabel: item.variantLabel,
+                unitPesewas: item.unitPesewas,
+                quantity: item.quantity,
+                sugarLevel: item.sugarLevel,
+                spiceLevel: item.spiceLevel,
+                note: item.note,
+              },
+            }),
+          ),
+        );
 
-      return created;
-    });
+        // Flatten all toppings into a single batch insert
+        const allToppings = orderItems.flatMap((orderItem, idx) =>
+          preparedItems[idx].toppings.map((t) => ({
+            orderItemId: orderItem.id,
+            toppingId: t.toppingId,
+            toppingName: t.toppingName,
+            toppingBasePesewas: t.toppingBasePesewas,
+            priceAppliedPesewas: t.priceAppliedPesewas,
+          })),
+        );
+
+        if (allToppings.length > 0) {
+          await tx.orderItemTopping.createMany({ data: allToppings });
+        }
+
+        return created;
+      },
+      { timeout: 30000, maxWait: 30000 },
+    );
 
     return {
       orderId: order.id,
       status: order.status,
-      totalGhs: orderTotalPesewas / 100, // convert back to GHS for response
+      totalGhs: orderTotalPesewas / 100,
       totalPesewas: orderTotalPesewas,
       message: 'Order placed successfully',
     };
