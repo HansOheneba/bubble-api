@@ -3,6 +3,7 @@ import {
   IsInt,
   IsOptional,
   IsArray,
+  IsEmail,
   ValidateNested,
   Min,
   ArrayMinSize,
@@ -41,7 +42,7 @@ export class OrderItemDto {
 
   @IsString()
   @IsOptional()
-  note?: string; // ← per-item note, already saved by service
+  note?: string;
 }
 
 export class CheckoutDto {
@@ -53,7 +54,16 @@ export class CheckoutDto {
 
   @IsString()
   @IsOptional()
-  notes?: string; // ← order-level note
+  notes?: string;
+
+  // Optional Hubtel payee fields — passed through to Hubtel for pre-filling
+  @IsString()
+  @IsOptional()
+  payeeName?: string;
+
+  @IsEmail()
+  @IsOptional()
+  payeeEmail?: string;
 
   @IsArray()
   @ArrayMinSize(1)

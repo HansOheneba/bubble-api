@@ -64,6 +64,7 @@ model ProductVariant {
   @@unique([productId, key])
   @@map("product_variants")
 }
+
 model Topping {
   id             Int     @id @default(autoincrement())
   name           String  @db.VarChar(100)
@@ -85,16 +86,22 @@ model Topping {
 // Valid values documented in comments.
 
 model Order {
-  id            Int      @id @default(autoincrement())
-  phone         String   @db.VarChar(30)
-  locationText  String   @db.VarChar(255)
-  notes         String?  @db.Text
-  status        String   @default("pending") @db.VarChar(30)
-  paymentStatus String   @default("unpaid") @db.VarChar(20)
-  totalPesewas  Int
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  items         OrderItem[]
+  id                Int      @id @default(autoincrement())
+  phone             String   @db.VarChar(30)
+  locationText      String   @db.VarChar(255)
+  notes             String?  @db.Text
+  status            String   @default("pending") @db.VarChar(30)
+  // paymentStatus: "unpaid" | "paid" | "failed"
+  paymentStatus     String   @default("unpaid") @db.VarChar(20)
+  totalPesewas      Int
+
+  // Hubtel payment tracking
+  clientReference   String   @unique @db.VarChar(32)
+  hubtelCheckoutId  String?  @db.VarChar(64)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  items     OrderItem[]
 
   @@map("orders")
 }
@@ -128,7 +135,7 @@ model OrderItemTopping {
   orderItemId          Int
   toppingId            Int
   toppingName          String  @db.VarChar(100)
-  productImage    String? @db.VarChar(255) 
+  productImage         String? @db.VarChar(255)
   toppingBasePesewas   Int
   priceAppliedPesewas  Int
 

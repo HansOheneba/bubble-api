@@ -19,7 +19,7 @@ async function bootstrap() {
 
   app.enableCors({ origin: '*' });
 
-  const port = Number(process.env.PORT ?? 3000);
+  const port = Number(process.env.PORT ?? 8080);
   await app.listen(port);
   console.log(`🫧  Bubble Bliss API running on http://localhost:${port}`);
 }

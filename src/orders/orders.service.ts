@@ -1,12 +1,27 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+  Logger,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CheckoutDto, OrderItemDto } from './dto/checkout.dto';
+import { HubtelService } from '../hubtel/hubtel.service';
+import { randomUUID } from 'crypto';
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(OrdersService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly hubtel: HubtelService,
+  ) {}
+
+  // ─── Checkout ─────────────────────────────────────────────────────────────
 
   async checkout(dto: CheckoutDto) {
+    // 1. Validate all items & calculate total
     const productIds = dto.items.map((i) => i.productId);
     const variantIds = dto.items.flatMap((i) =>
       i.variantId ? [i.variantId] : [],
@@ -59,7 +74,6 @@ export class OrdersService {
         unitPesewas = product.priceInPesewas;
       }
 
-      // first topping per item is free
       const itemToppings = item.toppings.map((t, idx) => {
         const topping = toppingMap.get(t.toppingId);
         if (!topping)
@@ -101,6 +115,30 @@ export class OrdersService {
       };
     });
 
+    // 2. Call Hubtel FIRST — no DB writes until Hubtel accepts
+    const totalGhs = orderTotalPesewas / 100;
+    const clientReference = randomUUID().replace(/-/g, '').slice(0, 32);
+
+    const hubtelResult = await this.hubtel.initiateCheckout({
+      totalAmount: totalGhs,
+      description: `Bubble Bliss Order`,
+      clientReference,
+      callbackUrl:
+        process.env.HUBTEL_CALLBACK_URL ??
+        'https://PLACEHOLDER.example.com/orders/callback',
+      returnUrl:
+        process.env.HUBTEL_RETURN_URL ??
+        'https://PLACEHOLDER.example.com/payment/success',
+      cancellationUrl:
+        process.env.HUBTEL_CANCEL_URL ??
+        'https://PLACEHOLDER.example.com/payment/cancelled',
+      merchantAccountNumber: process.env.HUBTEL_MERCHANT_ACCOUNT ?? '',
+      payeeMobileNumber: dto.phone,
+      payeeName: dto.payeeName,
+      payeeEmail: dto.payeeEmail,
+    });
+
+    // 3. Hubtel accepted — now save the order as pending/unpaid
     const order = await this.prisma.$transaction(
       async (tx) => {
         const created = await tx.order.create({
@@ -111,10 +149,11 @@ export class OrdersService {
             totalPesewas: orderTotalPesewas,
             status: 'pending',
             paymentStatus: 'unpaid',
+            clientReference,
+            hubtelCheckoutId: hubtelResult.checkoutId,
           },
         });
 
-        // Create all order items in parallel instead of sequentially
         const orderItems = await Promise.all(
           preparedItems.map((item) =>
             tx.orderItem.create({
@@ -134,7 +173,6 @@ export class OrdersService {
           ),
         );
 
-        // Flatten all toppings into a single batch insert
         const allToppings = orderItems.flatMap((orderItem, idx) =>
           preparedItems[idx].toppings.map((t) => ({
             orderItemId: orderItem.id,
@@ -154,12 +192,119 @@ export class OrdersService {
       { timeout: 30000, maxWait: 30000 },
     );
 
+    this.logger.log(
+      `Order #${order.id} created, awaiting payment (ref: ${clientReference})`,
+    );
+
+    // 4. Return checkout URLs to the frontend
+    return {
+      orderId: order.id,
+      clientReference,
+      totalGhs,
+      totalPesewas: orderTotalPesewas,
+      checkoutUrl: hubtelResult.checkoutUrl,
+      checkoutDirectUrl: hubtelResult.checkoutDirectUrl,
+      message: 'Proceed to payment.',
+    };
+  }
+
+  // ─── Hubtel Payment Callback ───────────────────────────────────────────────
+
+  async handlePaymentCallback(body: any) {
+    this.logger.log(`Hubtel callback received: ${JSON.stringify(body)}`);
+
+    const data = body?.Data ?? body?.data;
+    if (!data) {
+      this.logger.warn('Callback received with no data payload');
+      return { received: true };
+    }
+
+    const clientReference = data.ClientReference ?? data.clientReference;
+    const status = data.Status ?? data.status;
+    const amount = data.Amount ?? data.amount;
+    const customerPhone = data.CustomerPhoneNumber ?? data.customerPhoneNumber;
+
+    if (!clientReference) {
+      this.logger.warn('Callback missing clientReference');
+      return { received: true };
+    }
+
+    const order = await this.prisma.order.findUnique({
+      where: { clientReference },
+    });
+
+    if (!order) {
+      this.logger.warn(`Callback for unknown clientReference: ${clientReference}`);
+      return { received: true };
+    }
+
+    // Ignore duplicate callbacks — order already processed
+    if (order.paymentStatus === 'paid') {
+      this.logger.log(`Order #${order.id} already marked paid, skipping`);
+      return { received: true };
+    }
+
+    if (status === 'Success') {
+      // Mark order as paid and confirmed
+      await this.prisma.order.update({
+        where: { id: order.id },
+        data: {
+          paymentStatus: 'paid',
+          status: 'confirmed',
+        },
+      });
+
+      this.logger.log(`Order #${order.id} marked as paid`);
+
+      // Send confirmation SMS to customer
+      const totalGhs = (amount ?? order.totalPesewas / 100).toFixed(2);
+      const phone = customerPhone ?? order.phone;
+      const smsMessage =
+        `Thank you for your order at Bubble Bliss! 🫧\n` +
+        `Order #${order.id} confirmed — GHS ${totalGhs}.\n` +
+        `We'll have it ready for you soon!`;
+
+      await this.hubtel.sendSms(phone, smsMessage);
+    } else {
+      // Payment failed or was cancelled — mark order accordingly
+      await this.prisma.order.update({
+        where: { id: order.id },
+        data: {
+          paymentStatus: 'failed',
+          status: 'cancelled',
+        },
+      });
+
+      this.logger.warn(`Order #${order.id} payment failed (status: ${status})`);
+    }
+
+    return { received: true };
+  }
+
+  // ─── Status Check ──────────────────────────────────────────────────────────
+
+  async getOrderStatus(clientReference: string) {
+    const order = await this.prisma.order.findUnique({
+      where: { clientReference },
+      select: {
+        id: true,
+        status: true,
+        paymentStatus: true,
+        totalPesewas: true,
+        createdAt: true,
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException('Order not found');
+    }
+
     return {
       orderId: order.id,
       status: order.status,
-      totalGhs: orderTotalPesewas / 100,
-      totalPesewas: orderTotalPesewas,
-      message: 'Order placed successfully',
+      paymentStatus: order.paymentStatus,
+      totalGhs: order.totalPesewas / 100,
+      createdAt: order.createdAt,
     };
   }
 }
